@@ -1,7 +1,13 @@
 -- Baldi Frenzy utility
 -- Rayfield UI, client side
 
-local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+local ok, Rayfield = pcall(function()
+    return loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+end)
+if not ok or not Rayfield then
+    warn("rayfield load failed")
+    return
+end
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -20,6 +26,7 @@ local flags = {
     speed = 16,
     noclip = false,
     esp = false,
+    espItems = false,
     baldiClr = Color3.fromRGB(255, 50, 50),
     studentClr = Color3.fromRGB(0, 255, 120),
     bright = false,
@@ -29,25 +36,31 @@ local flags = {
     isBaldi = false,
 }
 
+local staminaFills = {}
+local hearingValues = {}
+local notebookCache = {}
+local itemCache = {}
+local oldAmbient, oldOutdoor
+
 local bypass = {}
 bypass.hooked = false
 bypass.fakeSpeed = 16
 
 function bypass.hookIndex()
     if bypass.hooked then return end
-    local ok, err = pcall(function()
+    local ok2, err = pcall(function()
         local old
         old = hookmetamethod(game, "__index", newcclosure(function(self, key)
-            if key == "WalkSpeed" and self:IsA("Humanoid") and not checkcaller() then
-                return bypass.fakeSpeed
-            end
-            if key == "CanCollide" and self:IsA("BasePart") and not checkcaller() then
-                return true
+            if not checkcaller() then
+                if key == "WalkSpeed" and self:IsA("Humanoid")
+                    and lp.Character and self:IsDescendantOf(lp.Character) then
+                    return bypass.fakeSpeed
+                end
             end
             return old(self, key)
         end))
     end)
-    if ok then
+    if ok2 then
         bypass.hooked = true
         print("index hook ok")
     else
@@ -57,12 +70,12 @@ end
 
 function bypass.setSpeed(h, spd)
     if not h then return end
-    bypass.fakeSpeed = 16
+    bypass.fakeSpeed = spd
     pcall(function() h.WalkSpeed = spd end)
 end
 
 function bypass.teleport(root, pos)
-    if not root then return end
+    if not root or typeof(pos) ~= "Vector3" then return end
     pcall(function()
         root.AssemblyLinearVelocity = Vector3.zero
         root.AssemblyAngularVelocity = Vector3.zero
@@ -107,17 +120,19 @@ local espTags = {}
 local espConn
 local lastEsp = 0
 
-local function makeTag(part, text, color)
-    if not part or espTags[part] then return end
+local function makeTag(part, text, color, withUnderline)
+    if not part or espTags[part] or not part:IsDescendantOf(game) then return end
     local bb = Instance.new("BillboardGui")
     bb.Name = "BF_ESP"
-    bb.Size = UDim2.new(0, 120, 0, 32)
+    bb.Size = UDim2.new(0, 140, 0, withUnderline and 44 or 32)
     bb.AlwaysOnTop = true
     bb.StudsOffset = Vector3.new(0, 3, 0)
     bb.Parent = part
+
     local l = Instance.new("TextLabel")
     l.Name = "Label"
-    l.Size = UDim2.new(1, 0, 1, 0)
+    l.Size = UDim2.new(1, 0, withUnderline and 0.6 or 1, 0)
+    l.Position = UDim2.new(0, 0, 0, 0)
     l.BackgroundTransparency = 1
     l.Text = text
     l.TextColor3 = color
@@ -125,6 +140,17 @@ local function makeTag(part, text, color)
     l.TextScaled = true
     l.Font = Enum.Font.SourceSansBold
     l.Parent = bb
+
+    if withUnderline then
+        local line = Instance.new("Frame")
+        line.Name = "Underline"
+        line.Size = UDim2.new(0.7, 0, 0, 2)
+        line.Position = UDim2.new(0.15, 0, 0.62, 0)
+        line.BackgroundColor3 = color
+        line.BorderSizePixel = 0
+        line.Parent = bb
+    end
+
     espTags[part] = bb
 end
 
@@ -146,8 +172,14 @@ local function repaint()
         if bb and bb.Parent then
             local l = bb:FindFirstChild("Label")
             if l then
-                local b = l.Text == "BALDI"
-                l.TextColor3 = b and flags.baldiClr or flags.studentClr
+                if l.Text == "BALDI" then
+                    l.TextColor3 = flags.baldiClr
+                elseif bb:FindFirstChild("Underline") then
+                    l.TextColor3 = Color3.fromRGB(255, 220, 80)
+                    bb.Underline.BackgroundColor3 = Color3.fromRGB(255, 220, 80)
+                else
+                    l.TextColor3 = flags.studentClr
+                end
             end
         end
     end
@@ -158,59 +190,146 @@ local function espLoop()
     if now - lastEsp < espRate then return end
     lastEsp = now
     local seen = {}
-    for _, m in ipairs(Workspace:GetChildren()) do
-        if m:IsA("Model") and (m:FindFirstChildOfClass("Humanoid") or m:FindFirstChild("HumanoidRootPart")) then
-            if m ~= char then
-                local root = m:FindFirstChild("HumanoidRootPart") or m.PrimaryPart
-                if root and root:IsA("BasePart") then
-                    local b = isBaldi(m)
-                    local txt = b and "BALDI" or m.Name
-                    local clr = b and flags.baldiClr or flags.studentClr
-                    local tag = espTags[root]
-                    if tag then
-                        local l = tag:FindFirstChild("Label")
-                        if l then
-                            l.Text = txt
-                            l.TextColor3 = clr
+
+    if flags.esp then
+        for _, m in ipairs(Workspace:GetChildren()) do
+            if m:IsA("Model") and (m:FindFirstChildOfClass("Humanoid") or m:FindFirstChild("HumanoidRootPart")) then
+                if m ~= char then
+                    local root = m:FindFirstChild("HumanoidRootPart") or m.PrimaryPart
+                    if root and root:IsA("BasePart") then
+                        local b = isBaldi(m)
+                        local txt = b and "BALDI" or m.Name
+                        local clr = b and flags.baldiClr or flags.studentClr
+                        local tag = espTags[root]
+                        if tag then
+                            local l = tag:FindFirstChild("Label")
+                            if l then
+                                l.Text = txt
+                                l.TextColor3 = clr
+                            end
+                        else
+                            makeTag(root, txt, clr, false)
                         end
-                    else
-                        makeTag(root, txt, clr)
+                        seen[root] = true
                     end
-                    seen[root] = true
                 end
             end
         end
     end
+
+    if flags.espItems then
+        for _, o in ipairs(itemCache) do
+            if o and o.Parent then
+                local tag = espTags[o]
+                if tag then
+                    local l = tag:FindFirstChild("Label")
+                    if l then l.Text = o.Name end
+                else
+                    makeTag(o, o.Name, Color3.fromRGB(255, 220, 80), true)
+                end
+                seen[o] = true
+            end
+        end
+    end
+
     for part in pairs(espTags) do
         if not seen[part] or not part.Parent then dropTag(part) end
     end
 end
 
-local function toggleEsp()
-    if flags.esp and not espConn then
+local function ensureEspLoop()
+    if (flags.esp or flags.espItems) and not espConn then
         espConn = RunService.Heartbeat:Connect(espLoop)
-    elseif not flags.esp and espConn then
+    elseif not flags.esp and not flags.espItems and espConn then
         espConn:Disconnect()
         espConn = nil
         dropAll()
     end
 end
 
-local function bindChar()
-    char = lp.Character
-    if not char then return end
-    hrp = char:WaitForChild("HumanoidRootPart", 5)
-    hum = char:WaitForChild("Humanoid", 5)
-    if hum then bypass.setSpeed(hum, flags.speed) end
+local gui = lp:FindFirstChild("PlayerGui")
+if gui then
+    for _, d in ipairs(gui:GetDescendants()) do
+        if d:IsA("Frame") and d.Name:lower():find("stamina") then
+            local f = d:FindFirstChild("Fill")
+            if f then staminaFills[f] = f.Size end
+        end
+        if (d:IsA("NumberValue") or d:IsA("IntValue")) and d.Name:lower():find("hearing") then
+            hearingValues[d] = d.Value
+        end
+    end
+    gui.DescendantAdded:Connect(function(d)
+        if d:IsA("Frame") and d.Name:lower():find("stamina") then
+            local f = d:FindFirstChild("Fill")
+            if f then staminaFills[f] = f.Size end
+        end
+        if (d:IsA("NumberValue") or d:IsA("IntValue")) and d.Name:lower():find("hearing") then
+            hearingValues[d] = d.Value
+        end
+    end)
 end
 
-lp.CharacterAdded:Connect(function()
-    bindChar()
-    task.wait(1)
+local function onChar(c)
+    char = c
+    hrp = c:WaitForChild("HumanoidRootPart", 5)
+    hum = c:WaitForChild("Humanoid", 5)
+    if hum then bypass.setSpeed(hum, flags.speed) end
     updateRole()
+    c:GetAttributeChangedSignal("Role"):Connect(updateRole)
+    c.ChildAdded:Connect(function(d)
+        if d.Name == "Ruler" or d.Name == "BaldiRuler" then updateRole() end
+    end)
+    if flags.noclip then bypass.setNoclip(c, true) end
+end
+lp.CharacterAdded:Connect(onChar)
+if lp.Character then onChar(lp.Character) end
+
+local function isNotebook(o)
+    local n = o.Name:lower()
+    return n:find("notebook", 1, true) or n:find("notepad", 1, true) or n:find("paper", 1, true)
+end
+
+local function isItem(o)
+    local n = o.Name:lower()
+    for _, k in ipairs({"notebook", "notepad", "exit", "key", "paper", "door"}) do
+        if n:find(k, 1, true) then return true end
+    end
+    return false
+end
+
+local function rebuildNotebooks()
+    notebookCache = {}
+    for _, o in ipairs(Workspace:GetDescendants()) do
+        if o:IsA("BasePart") and isNotebook(o) then
+            table.insert(notebookCache, o)
+        end
+    end
+end
+local function rebuildItems()
+    itemCache = {}
+    for _, o in ipairs(Workspace:GetDescendants()) do
+        if o:IsA("BasePart") and isItem(o) then
+            table.insert(itemCache, o)
+        end
+    end
+end
+rebuildNotebooks()
+rebuildItems()
+
+Workspace.DescendantAdded:Connect(function(d)
+    if d:IsA("BasePart") then
+        if isNotebook(d) then table.insert(notebookCache, d) end
+        if isItem(d) then table.insert(itemCache, d) end
+    end
 end)
-bindChar()
-updateRole()
+Workspace.DescendantRemoving:Connect(function(d)
+    for i, v in ipairs(notebookCache) do
+        if v == d then table.remove(notebookCache, i) break end
+    end
+    for i, v in ipairs(itemCache) do
+        if v == d then table.remove(itemCache, i) break end
+    end
+end)
 
 local win = Rayfield:CreateWindow({
     Name = "Baldi Frenzy Menu",
@@ -235,13 +354,9 @@ main:CreateToggle({
             task.spawn(function()
                 while flags.stamina do
                     task.wait(mobile and 0.2 or 0.1)
-                    local gui = lp:FindFirstChild("PlayerGui")
-                    if gui then
-                        for _, d in ipairs(gui:GetDescendants()) do
-                            if d:IsA("Frame") and d.Name:lower():find("stamina") then
-                                local f = d:FindFirstChild("Fill")
-                                if f then f.Size = UDim2.new(1, 0, 1, 0) end
-                            end
+                    for f in pairs(staminaFills) do
+                        if f.Parent then
+                            pcall(function() f.Size = UDim2.new(1, 0, 1, 0) end)
                         end
                     end
                 end
@@ -270,14 +385,6 @@ main:CreateToggle({
     Callback = function(v)
         flags.noclip = v
         if char then bypass.setNoclip(char, v) end
-        if v then
-            task.spawn(function()
-                while flags.noclip do
-                    task.wait(mobile and 0.3 or 0.2)
-                    if char then bypass.setNoclip(char, true) end
-                end
-            end)
-        end
     end,
 })
 
@@ -289,7 +396,17 @@ main:CreateToggle({
     Flag = "Esp",
     Callback = function(v)
         flags.esp = v
-        toggleEsp()
+        ensureEspLoop()
+    end,
+})
+
+main:CreateToggle({
+    Name = "Item ESP",
+    CurrentValue = false,
+    Flag = "EspItems",
+    Callback = function(v)
+        flags.espItems = v
+        ensureEspLoop()
     end,
 })
 
@@ -320,11 +437,13 @@ main:CreateToggle({
     Callback = function(v)
         flags.bright = v
         if v then
+            oldAmbient = Lighting.Ambient
+            oldOutdoor = Lighting.OutdoorAmbient
             Lighting.Ambient = Color3.fromRGB(200, 200, 200)
             Lighting.OutdoorAmbient = Color3.fromRGB(200, 200, 200)
         else
-            Lighting.Ambient = Color3.fromRGB(0, 0, 0)
-            Lighting.OutdoorAmbient = Color3.fromRGB(128, 128, 128)
+            if oldAmbient then Lighting.Ambient = oldAmbient end
+            if oldOutdoor then Lighting.OutdoorAmbient = oldOutdoor end
         end
     end,
 })
@@ -334,13 +453,13 @@ main:CreateButton({
     Callback = function()
         dropAll()
         flags.esp = false
-        toggleEsp()
+        flags.espItems = false
+        ensureEspLoop()
     end,
 })
 
 local stu = win:CreateTab("Student", 4483362458)
 
-local nbKeys = {"notebook"}
 local exitKeys = {"exit"}
 
 local function hasKw(name, keys)
@@ -356,8 +475,8 @@ stu:CreateButton({
     Callback = function()
         if not hrp then return end
         local best, dist = nil, math.huge
-        for _, o in ipairs(Workspace:GetDescendants()) do
-            if o:IsA("BasePart") and hasKw(o.Name, nbKeys) then
+        for _, o in ipairs(notebookCache) do
+            if o and o.Parent then
                 local d = (o.Position - hrp.Position).Magnitude
                 if d < dist then dist = d; best = o end
             end
@@ -397,15 +516,13 @@ stu:CreateToggle({
                 while flags.autoNotebook do
                     task.wait(mobile and 0.8 or 0.5)
                     if hrp then
-                        for _, o in ipairs(Workspace:GetDescendants()) do
-                            if o:IsA("BasePart") and hasKw(o.Name, nbKeys) then
-                                if (o.Position - hrp.Position).Magnitude < 50 then
-                                    pcall(function()
-                                        firetouchinterest(hrp, o, 0)
-                                        task.wait(0.1)
-                                        firetouchinterest(hrp, o, 1)
-                                    end)
-                                end
+                        for _, o in ipairs(notebookCache) do
+                            if o and o.Parent and (o.Position - hrp.Position).Magnitude < 50 then
+                                pcall(function()
+                                    firetouchinterest(hrp, o, 0)
+                                    task.wait(0.1)
+                                    firetouchinterest(hrp, o, 1)
+                                end)
                             end
                         end
                     end
@@ -423,8 +540,19 @@ bt:CreateToggle({
     Flag = "Hear",
     Callback = function(v)
         flags.hear = v
-        if v and not flags.isBaldi then
-            Rayfield:Notify({Title = "Always Hear", Content = "only works as Baldi", Duration = 3})
+        if v then
+            if not flags.isBaldi then
+                Rayfield:Notify({Title = "Always Hear", Content = "only works as Baldi", Duration = 3})
+            end
+            task.spawn(function()
+                while flags.hear do
+                    task.wait(mobile and 0.4 or 0.25)
+                    local target = char and (char:FindFirstChild("Hearing") or char:FindFirstChild("HearRange"))
+                    if target then
+                        pcall(function() target.Value = 9999 end)
+                    end
+                end
+            end)
         end
     end,
 })
@@ -439,12 +567,9 @@ bt:CreateToggle({
             task.spawn(function()
                 while flags.noDecay do
                     task.wait(mobile and 0.4 or 0.25)
-                    local gui = lp:FindFirstChild("PlayerGui")
-                    if gui then
-                        for _, d in ipairs(gui:GetDescendants()) do
-                            if (d:IsA("NumberValue") or d:IsA("IntValue")) and d.Name:lower():find("hearing") then
-                                d.Value = 999
-                            end
+                    for val in pairs(hearingValues) do
+                        if val.Parent then
+                            pcall(function() val.Value = 999 end)
                         end
                     end
                 end
@@ -452,8 +577,6 @@ bt:CreateToggle({
         end
     end,
 })
-
-lp.CharacterRemoving:Connect(dropAll)
 
 Rayfield:Notify({
     Title = "Baldi Frenzy Menu",
